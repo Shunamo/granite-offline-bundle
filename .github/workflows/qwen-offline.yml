@@ -1,0 +1,71 @@
+name: Build Qwen3-Embedding-0.6B Offline Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_revision:
+        description: "고정할 HF revision/commit SHA (비우면 실행 시점의 main 브랜치 SHA를 자동 resolve)"
+        required: false
+        default: ""
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install download dependencies
+        run: pip install "huggingface_hub>=0.25,<1.0"
+
+      - name: Download Qwen3-Embedding-0.6B snapshot (pinned revision, integrity-checked)
+        env:
+          HF_REVISION_INPUT: ${{ inputs.model_revision }}
+        run: python scripts/ci/download_qwen.py
+
+      - name: Strip HF cache metadata / LFS tracking files from bundle
+        run: |
+          find Qwen3-Embedding-0.6B -type d -name ".cache" -exec rm -rf {} + 2>/dev/null || true
+          find Qwen3-Embedding-0.6B -type f -name ".gitattributes" -delete 2>/dev/null || true
+
+      - name: Show bundle contents
+        run: |
+          cat manifest.json
+          cat MODEL_REVISION.txt
+          du -sh Qwen3-Embedding-0.6B
+
+      - name: Zip offline bundle
+        run: zip -r qwen3-embedding-0.6b-offline.zip Qwen3-Embedding-0.6B manifest.json MODEL_REVISION.txt
+
+      - name: SHA256 checksum
+        run: sha256sum qwen3-embedding-0.6b-offline.zip | tee qwen3-embedding-0.6b-offline.sha256
+
+      - name: Install validation dependencies
+        run: pip install sentence-transformers
+
+      - name: Offline load test (network blocked)
+        run: |
+          mkdir -p /tmp/offline_extract
+          unzip -q qwen3-embedding-0.6b-offline.zip -d /tmp/offline_extract
+          rm -rf ~/.cache/huggingface
+          echo "0.0.0.0 huggingface.co" | sudo tee -a /etc/hosts
+          echo "0.0.0.0 cdn-lfs.huggingface.co" | sudo tee -a /etc/hosts
+          echo "0.0.0.0 hf.co" | sudo tee -a /etc/hosts
+          HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python tests/test_qwen_offline.py \
+            /tmp/offline_extract/Qwen3-Embedding-0.6B
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-embedding-0.6b-offline
+          path: |
+            qwen3-embedding-0.6b-offline.zip
+            qwen3-embedding-0.6b-offline.sha256
+            MODEL_REVISION.txt
+            manifest.json
+          retention-days: 90
